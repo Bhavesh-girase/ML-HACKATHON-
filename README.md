@@ -1,7 +1,7 @@
 # Model link: https://github.com/Bhavesh-girase/-SUNWISE-ML-MODEL
 
 
-#SUNWISE
+#                                                  ☀️SUNWISE
 This project is built with:
 
 - Vite
@@ -9,6 +9,7 @@ This project is built with:
 - React
 - shadcn-ui
 - Tailwind CSS
+- Fast api
 
 
 Features:
