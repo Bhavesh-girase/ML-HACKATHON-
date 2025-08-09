@@ -252,7 +252,7 @@ const WeeklyDCCurrentChart = ({ dcData }: { dcData: number[] }) => {
     labels: ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5", "Day 6", "Day 7"],
     datasets: [
       {
-        label: "Daily DC Current (kA)",
+        label: "Daily DC Current (A)",
         data: dailyTotalAmp,
         backgroundColor: "rgba(34,197,94,0.6)",
         borderColor: "rgba(34,197,94,1)",
@@ -276,7 +276,7 @@ const WeeklyDCCurrentChart = ({ dcData }: { dcData: number[] }) => {
         borderWidth: 1,
         cornerRadius: 8,
         callbacks: {
-          label: (ctx: any) => `${ctx.parsed.y} kA`,
+          label: (ctx: any) => `${ctx.parsed.y} A`,
         },
       },
     },
