@@ -5,6 +5,8 @@ import { motion } from "framer-motion";
 import { Line, Bar } from "react-chartjs-2";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
+import * as XLSX from "xlsx";
+import { saveAs } from "file-saver";
 
 import {
   Chart as ChartJS,
@@ -112,33 +114,225 @@ const tomorrowACkW = acHourly.slice(24, 48).map(val => (val / 1000).toFixed(2));
 const todayDCAmp = dcHourly.slice(0, 24).map(val => +val.toFixed(2));
 const tomorrowDCAmp = dcHourly.slice(24, 48).map(val => +val.toFixed(2));
 
-const downloadCSV = (acData: number[], dcData: number[]) => {
-  const header = ["Day", "Hour", "AC Power (kWh)", "DC Current (A)"];
-  const rows = [];
+// call example:
+// downloadCSV(acHourly, dcHourly, { location: "Pune, India", panelCapacityKW: 1.2 });
 
-  for (let i = 0; i < 168; i++) {
-    const dayNumber = Math.floor(i / 24) + 1;
-    const hourOfDay = i % 24;
-    const dayLabel = `Day ${dayNumber}`;
-    const hourLabel = `${hourOfDay}:00`;
-    const acPower = (acData[i] / 1000).toFixed(2);
-    const dcCurrent = dcData[i].toFixed(2);
-    rows.push([dayLabel, hourLabel, acPower, dcCurrent]);
+type CSVOptions = {
+  location?: string;
+  panelCapacityKW?: number;
+  startDate?: string | Date; // optional start date for the first day's midnight (local)
+};
+
+const downloadCSV = (
+  acData: number[],
+  dcData: number[],
+  options: CSVOptions = {}
+) => {
+
+  if (!options.location || !options.panelCapacityKW) {
+    const savedConfig = JSON.parse(localStorage.getItem("solarConfig") || "{}");
+    if (savedConfig.city) {
+      options.location = `${savedConfig.city} (${savedConfig.latitude}, ${savedConfig.longitude})`;
+    }
+    if (savedConfig.panelWattage) {
+      // Convert watts to kWp
+      options.panelCapacityKW = savedConfig.panelWattage;
+    }
   }
 
-  const csvContent =
-    [header.join(","), ...rows.map((r) => r.join(","))].join("\n");
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const totalHours = Math.min(acData.length, dcData.length);
+  if (totalHours === 0) {
+    console.warn("No data to export");
+    return;
+  }
 
+  const numDays = Math.ceil(totalHours / 24);
+
+  // Determine start date: if provided use it (midnight local), otherwise assume "today" minus (numDays-1)
+  const startDate = options.startDate
+    ? new Date(options.startDate)
+    : (() => {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        d.setDate(d.getDate() - (numDays - 1));
+        return d;
+      })();
+  startDate.setHours(0, 0, 0, 0); // ensure midnight local
+
+  const weekStartStr = formatDate(startDate);
+  const weekEnd = new Date(startDate.getTime() + (numDays - 1) * msPerDay);
+  const weekEndStr = formatDate(weekEnd);
+  const generatedOn = new Date().toLocaleString();
+
+  // Helpers
+  function pad(n: number) {
+    return n < 10 ? "0" + n : String(n);
+  }
+  function formatDate(d: Date) {
+    // local YYYY-MM-DD
+    const y = d.getFullYear();
+    const m = pad(d.getMonth() + 1);
+    const day = pad(d.getDate());
+    return `${y}-${m}-${day}`;
+  }
+  function escapeCSV(cell: any) {
+    if (cell === null || cell === undefined) return "";
+    let s = String(cell);
+    if (s.includes('"')) s = s.replace(/"/g, '""');
+    if (s.includes(",") || s.includes("\n") || s.includes('"')) {
+      return `"${s}"`;
+    }
+    return s;
+  }
+
+  // Build metadata header (as rows before the table)
+  const metadataRows: string[][] = [
+    ["Location", options.location ?? ""],
+    ["Panel Capacity (kWp)", options.panelCapacityKW ?? ""],
+    ["Data Points (hours)", String(totalHours)],
+    ["Week Start", weekStartStr],
+    ["Week End", weekEndStr],
+    ["Generated On", generatedOn],
+    [""], // blank line
+  ];
+
+  // Table header
+  const tableHeader = [
+    "Date",
+    "Day",
+    "Hour",
+    "Timestamp",
+    "AC Power (kWh)",
+    "Cumulative AC (kWh)",
+    "DC Current (A)",
+    "Cumulative DC (A)",
+  ];
+
+  const rows: any[][] = [];
+  let cumulativeAC = 0;
+  let cumulativeDC = 0;
+
+  for (let i = 0; i < totalHours; i++) {
+    const dayIndex = Math.floor(i / 24);
+    const hourOfDay = i % 24;
+    const dateForRow = new Date(startDate.getTime() + dayIndex * msPerDay);
+    const dateStr = formatDate(dateForRow);
+    const dayName = dateForRow.toLocaleDateString("en-US", { weekday: "short" }); // Mon, Tue...
+    const hourText = `${pad(hourOfDay)}:00`;
+    const timestamp = `${dateStr} ${hourText}`;
+
+    const acKWh = acData[i] / 1000; // convert to kWh
+    const dcA = dcData[i];
+
+    cumulativeAC += acKWh;
+    cumulativeDC += dcA;
+
+    // Prefix hour with apostrophe to prevent Excel auto-formatting (keeps it as text)
+    rows.push([
+      dateStr,
+      dayName,
+      `'${hourText}`,
+      timestamp,
+      acKWh.toFixed(2),
+      cumulativeAC.toFixed(2),
+      dcA.toFixed(2),
+      cumulativeDC.toFixed(2),
+    ]);
+
+    // After end of day insert separator (only if there is a next day)
+    const lastIndexOfThisDay = (dayIndex + 1) * 24 - 1;
+    const isLastHourOfDay = i === lastIndexOfThisDay;
+    const nextDayExists = dayIndex + 1 < numDays;
+    if (isLastHourOfDay && nextDayExists) {
+      rows.push(["", "", "", "", "", "", "", ""]); // blank row
+      rows.push([`--- Day ${dayIndex + 2} Started ---`, "", "", "", "", "", "", ""]); // visible text row
+      rows.push(["", "", "", "", "", "", "", ""]); // blank row
+    }
+  }
+
+  // Pivot-like daily summary
+  rows.push(["", "", "", "", "", "", "", ""]);
+  rows.push(["Daily Summary", "", "", "", "", "", "", ""]);
+  const summaryHeader = [
+    "Day",
+    "Date",
+    "Total AC (kWh)",
+    "Avg AC per hour (kWh)",
+    "Total DC (A)",
+    "Avg DC per hour (A)",
+  ];
+  rows.push(summaryHeader);
+
+  let weeklyTotalAC = 0;
+  let weeklyTotalDC = 0;
+
+  for (let day = 0; day < numDays; day++) {
+    const startIdx = day * 24;
+    const endIdx = Math.min(startIdx + 24, totalHours);
+    const dateForRow = new Date(startDate.getTime() + day * msPerDay);
+    const dateStr = formatDate(dateForRow);
+
+    const dayACkWhs = [];
+    const dayDCs = [];
+    for (let j = startIdx; j < endIdx; j++) {
+      dayACkWhs.push(acData[j] / 1000);
+      dayDCs.push(dcData[j]);
+    }
+    const totalAC = dayACkWhs.reduce((s, v) => s + v, 0);
+    const avgAC = dayACkWhs.length ? totalAC / dayACkWhs.length : 0;
+    const totalDC = dayDCs.reduce((s, v) => s + v, 0);
+    const avgDC = dayDCs.length ? totalDC / dayDCs.length : 0;
+
+    weeklyTotalAC += totalAC;
+    weeklyTotalDC += totalDC;
+
+    rows.push([
+      `Day ${day + 1}`,
+      dateStr,
+      totalAC.toFixed(2),
+      avgAC.toFixed(3),
+      totalDC.toFixed(2),
+      avgDC.toFixed(3),
+    ]);
+  }
+
+  // Weekly summary
+  rows.push(["", "", "", "", "", "", "", ""]);
+  rows.push(["Weekly Summary", "", "", "", "", "", "", ""]);
+  rows.push([
+    "Total AC (kWh)",
+    weeklyTotalAC.toFixed(2),
+    "Average AC per day (kWh)",
+    (weeklyTotalAC / numDays).toFixed(2),
+    "Total DC (A)",
+    weeklyTotalDC.toFixed(2),
+  ]);
+
+  // Build CSV string (escape cells)
+  const csvLines: string[] = [];
+  for (const r of metadataRows) {
+    csvLines.push(r.map(escapeCSV).join(","));
+  }
+  csvLines.push(tableHeader.map(escapeCSV).join(","));
+  for (const r of rows) {
+    csvLines.push(r.map(escapeCSV).join(","));
+  }
+
+  const csvContent = csvLines.join("\n");
   const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
 
   const link = document.createElement("a");
   link.href = url;
-  link.setAttribute("download", `weekly_power_summary.csv`);
+  link.setAttribute("download", `weekly_power_report.csv`);
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
 };
+
+
+
 
 
 
